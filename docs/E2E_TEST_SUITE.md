@@ -39,6 +39,17 @@ This suite validates the full user journey from session bootstrap through world 
     - `queued` -> `processing` -> `succeeded` (or explicit failure state).
   - Worker logs show provider operation polling.
 
+### 3A. Prompt Mode Coverage Matrix
+- Validate all supported prompt modes:
+  - `text`: no source upload required, text prompt required.
+  - `image`: uploaded image source required.
+  - `multi_image`: source image and/or reference image list required.
+  - `video`: uploaded video source required.
+- For each mode:
+  - Submit generate request from UI.
+  - Confirm queued job creation.
+  - Confirm World Labs request payload matches selected mode.
+
 ### 4. Gallery + World Detail
 - Refresh worlds list from UI.
 - Expected:
@@ -49,7 +60,7 @@ This suite validates the full user journey from session bootstrap through world 
 ### 5. Viewer Modes
 - Open world in modal and dedicated `/worlds/{worldId}` page.
 - Expected one of:
-  - Marble URL mode (iframe interactive).
+  - Marble URL mode (open in new tab, with fallback links).
   - Splat preview mode (canvas interactions: drag, WASD, wheel, shift).
   - Fallback mode with clear unsupported message.
 

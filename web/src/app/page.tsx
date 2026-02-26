@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { WorldViewerModal } from "@/components/world-viewer-modal";
 import {
@@ -39,11 +39,15 @@ const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image
 const VIDEO_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
 
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [referenceFiles, setReferenceFiles] = useState<File[]>([]);
   const [uploadKind, setUploadKind] = useState<UploadKind>("image");
   const [promptType, setPromptType] = useState<PromptType>("image");
   const [displayName, setDisplayName] = useState<string>("");
   const [textPrompt, setTextPrompt] = useState<string>("");
+  const [disableRecaption, setDisableRecaption] = useState<boolean>(false);
+  const [isPano, setIsPano] = useState<boolean>(false);
+  const [reconstructImages, setReconstructImages] = useState<boolean>(false);
   const [model, setModel] = useState<string>(MODEL_OPTIONS[0]);
   const [publicWorld, setPublicWorld] = useState<boolean>(true);
   const [tags, setTags] = useState<string>("interior");
@@ -51,7 +55,12 @@ export default function Home() {
   const [stage, setStage] = useState<Stage>("idle");
   const [uploadPercent, setUploadPercent] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [confirmedMediaAssetId, setConfirmedMediaAssetId] = useState<string | null>(null);
+  const [confirmedSourceKind, setConfirmedSourceKind] = useState<UploadKind | null>(null);
+  const [confirmedReferenceMediaAssetIds, setConfirmedReferenceMediaAssetIds] = useState<
+    string[]
+  >([]);
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [worlds, setWorlds] = useState<WorldCard[]>([]);
@@ -59,8 +68,34 @@ export default function Home() {
 
   const [isViewerOpen, setIsViewerOpen] = useState<boolean>(false);
   const [viewerWorld, setViewerWorld] = useState<WorldDetail | null>(null);
+  const displayNameInputRef = useRef<HTMLInputElement | null>(null);
 
   const isBusy = stage !== "idle" && stage !== "error";
+  const trimmedTextPrompt = textPrompt.trim();
+
+  const canGenerate = useMemo(() => {
+    if (isBusy) {
+      return false;
+    }
+    if (promptType === "text") {
+      return Boolean(trimmedTextPrompt);
+    }
+    if (promptType === "image") {
+      return Boolean(confirmedMediaAssetId) && confirmedSourceKind === "image";
+    }
+    if (promptType === "video") {
+      return Boolean(confirmedMediaAssetId) && confirmedSourceKind === "video";
+    }
+    const hasImageSource = Boolean(confirmedMediaAssetId) && confirmedSourceKind === "image";
+    return hasImageSource || confirmedReferenceMediaAssetIds.length > 0;
+  }, [
+    confirmedMediaAssetId,
+    confirmedReferenceMediaAssetIds,
+    confirmedSourceKind,
+    isBusy,
+    promptType,
+    trimmedTextPrompt,
+  ]);
 
   const stageLabel = useMemo(() => {
     if (stage === "idle") return "Ready";
@@ -89,6 +124,14 @@ export default function Home() {
     };
     void init();
   }, []);
+
+  useEffect(() => {
+    if (promptType === "video") {
+      setUploadKind("video");
+      return;
+    }
+    setUploadKind("image");
+  }, [promptType]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -138,63 +181,103 @@ export default function Home() {
     }
   };
 
+  const validateAssetFile = async (
+    selectedFile: File,
+    kind: UploadKind,
+  ): Promise<{ extension: string; mimeType: string }> => {
+    const extension = selectedFile.name.includes(".")
+      ? (selectedFile.name.split(".").pop() ?? "").toLowerCase()
+      : "";
+    const mimeType = (selectedFile.type || "application/octet-stream").toLowerCase();
+
+    if (kind === "image") {
+      if (!IMAGE_EXTENSIONS.has(extension) || !IMAGE_MIME_TYPES.has(mimeType)) {
+        throw new Error("Unsupported image format. Use PNG, JPG, JPEG, or WEBP.");
+      }
+      try {
+        await createImageBitmap(selectedFile);
+      } catch {
+        throw new Error("Invalid image data. Please select a valid image file.");
+      }
+    }
+
+    if (kind === "video") {
+      if (!VIDEO_EXTENSIONS.has(extension) || !VIDEO_MIME_TYPES.has(mimeType)) {
+        throw new Error("Unsupported video format. Use MP4, MOV, or WEBM.");
+      }
+    }
+
+    return { extension, mimeType };
+  };
+
+  const uploadAndConfirmAsset = async (
+    selectedFile: File,
+    kind: UploadKind,
+  ): Promise<string> => {
+    const { extension, mimeType } = await validateAssetFile(selectedFile, kind);
+
+    const ticket = await prepareUpload({
+      file_name: selectedFile.name,
+      kind,
+      extension,
+      mime_type: mimeType,
+      metadata: { size_bytes: selectedFile.size },
+    });
+
+    setStage("uploading");
+    await proxyUpload(ticket.media_asset_id, selectedFile);
+    setStage("confirming");
+    await confirmUpload(ticket.media_asset_id);
+    return ticket.media_asset_id;
+  };
+
   const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!file) {
+    if (!sourceFile && referenceFiles.length === 0) {
       setStage("error");
-      setErrorMessage("Select an input file before upload.");
+      setErrorMessage("Select at least one file before running upload.");
       return;
     }
 
     setErrorMessage(null);
+    setActionMessage(null);
     setUploadPercent(0);
-    setConfirmedMediaAssetId(null);
 
     try {
       setStage("preparing");
-      const extension = file.name.includes(".")
-        ? (file.name.split(".").pop() ?? "").toLowerCase()
-        : "";
-      const mimeType = (file.type || "application/octet-stream").toLowerCase();
+      const totalUploadCount = (sourceFile ? 1 : 0) + referenceFiles.length;
+      let completedUploads = 0;
 
-      if (uploadKind === "image") {
-        if (!IMAGE_EXTENSIONS.has(extension) || !IMAGE_MIME_TYPES.has(mimeType)) {
-          throw new Error(
-            "Unsupported image format. Use PNG, JPG, JPEG, or WEBP.",
-          );
-        }
-        try {
-          await createImageBitmap(file);
-        } catch {
-          throw new Error(
-            "Invalid image data. Please select a valid PNG, JPG, JPEG, or WEBP file.",
-          );
-        }
-      }
-      if (uploadKind === "video") {
-        if (!VIDEO_EXTENSIONS.has(extension) || !VIDEO_MIME_TYPES.has(mimeType)) {
-          throw new Error("Unsupported video format. Use MP4, MOV, or WEBM.");
-        }
+      let nextSourceMediaAssetId = confirmedMediaAssetId;
+      let nextSourceKind = confirmedSourceKind;
+      const nextReferenceMediaAssetIds = [...confirmedReferenceMediaAssetIds];
+
+      if (sourceFile) {
+        const sourceMediaAssetId = await uploadAndConfirmAsset(sourceFile, uploadKind);
+        nextSourceMediaAssetId = sourceMediaAssetId;
+        nextSourceKind = uploadKind;
+        completedUploads += 1;
+        setUploadPercent(Math.round((completedUploads / totalUploadCount) * 100));
       }
 
-      const ticket = await prepareUpload({
-        file_name: file.name,
-        kind: uploadKind,
-        extension,
-        mime_type: mimeType,
-        metadata: { size_bytes: file.size },
-      });
+      for (const referenceFile of referenceFiles) {
+        const referenceMediaAssetId = await uploadAndConfirmAsset(referenceFile, "image");
+        nextReferenceMediaAssetIds.push(referenceMediaAssetId);
+        completedUploads += 1;
+        setUploadPercent(Math.round((completedUploads / totalUploadCount) * 100));
+      }
 
-      setStage("uploading");
-      // Use API proxy upload by default to avoid provider signed-URL browser CORS issues.
-      setUploadPercent(35);
-      await proxyUpload(ticket.media_asset_id, file);
-      setUploadPercent(100);
+      setConfirmedMediaAssetId(nextSourceMediaAssetId);
+      setConfirmedSourceKind(nextSourceKind);
+      setConfirmedReferenceMediaAssetIds(Array.from(new Set(nextReferenceMediaAssetIds)));
+      setSourceFile(null);
+      setReferenceFiles([]);
 
-      setStage("confirming");
-      await confirmUpload(ticket.media_asset_id);
-
-      setConfirmedMediaAssetId(ticket.media_asset_id);
+      if (referenceFiles.length > 0) {
+        setActionMessage(
+          `Uploaded ${referenceFiles.length} reference asset${referenceFiles.length > 1 ? "s" : ""}.`,
+        );
+      }
       setStage("idle");
     } catch (error) {
       setStage("error");
@@ -204,9 +287,39 @@ export default function Home() {
 
   const handleGenerate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!confirmedMediaAssetId) {
+    if (promptType === "text" && !trimmedTextPrompt) {
       setStage("error");
-      setErrorMessage("Upload and confirm a media asset before generation.");
+      setErrorMessage("Text prompt is required for text generation.");
+      return;
+    }
+    if (promptType === "image" && (!confirmedMediaAssetId || confirmedSourceKind !== "image")) {
+      setStage("error");
+      setErrorMessage("Image prompt requires an uploaded image source asset.");
+      return;
+    }
+    if (promptType === "video" && (!confirmedMediaAssetId || confirmedSourceKind !== "video")) {
+      setStage("error");
+      setErrorMessage("Video prompt requires an uploaded video source asset.");
+      return;
+    }
+    if (
+      promptType === "multi_image" &&
+      !confirmedMediaAssetId &&
+      confirmedReferenceMediaAssetIds.length === 0
+    ) {
+      setStage("error");
+      setErrorMessage(
+        "Multi-image prompt requires a source image or at least one reference image.",
+      );
+      return;
+    }
+    if (
+      promptType === "multi_image" &&
+      confirmedMediaAssetId &&
+      confirmedSourceKind !== "image"
+    ) {
+      setStage("error");
+      setErrorMessage("Multi-image prompt source must be an uploaded image asset.");
       return;
     }
 
@@ -215,7 +328,12 @@ export default function Home() {
       const response = await generateWorld({
         source_media_asset_id: confirmedMediaAssetId,
         prompt_type: promptType,
-        text_prompt: textPrompt || null,
+        text_prompt: trimmedTextPrompt || null,
+        disable_recaption: disableRecaption,
+        is_pano: promptType === "image" ? isPano : undefined,
+        reconstruct_images: promptType === "multi_image" ? reconstructImages : undefined,
+        reference_media_asset_ids:
+          promptType === "multi_image" ? confirmedReferenceMediaAssetIds : [],
         display_name: displayName || null,
         model,
         public: publicWorld,
@@ -266,7 +384,42 @@ export default function Home() {
       return;
     }
     const base = window.location.origin;
-    await navigator.clipboard.writeText(`${base}/worlds/${worldId}`);
+    const shareUrl = `${base}/worlds/${worldId}`;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(shareUrl);
+      } else {
+        const textArea = document.createElement("textarea");
+        textArea.value = shareUrl;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+      }
+      setActionMessage("Share link copied.");
+      window.setTimeout(() => setActionMessage(null), 2200);
+    } catch {
+      setErrorMessage("Copy failed. Please copy from the browser URL bar.");
+      setStage("error");
+    }
+  };
+
+  const rerunWithEdits = (world: WorldCard) => {
+    setDisplayName(world.display_name ?? "");
+    setPromptType("image");
+    setActionMessage("Loaded world settings into generate form.");
+    window.setTimeout(() => setActionMessage(null), 2200);
+    document.getElementById("generate-world-form")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+    window.setTimeout(() => {
+      displayNameInputRef.current?.focus();
+      displayNameInputRef.current?.select();
+    }, 250);
   };
 
   return (
@@ -288,6 +441,11 @@ export default function Home() {
       {errorMessage ? (
         <p className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {errorMessage}
+        </p>
+      ) : null}
+      {actionMessage ? (
+        <p className="mb-5 rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800">
+          {actionMessage}
         </p>
       ) : null}
 
@@ -313,12 +471,26 @@ export default function Home() {
               </label>
 
               <label className="block space-y-1">
-                <span className="text-sm font-medium">Reference File</span>
+                <span className="text-sm font-medium">Primary Source File</span>
                 <input
                   className="block w-full rounded-xl border border-line bg-white px-3 py-2 text-sm file:mr-4 file:rounded-lg file:border-0 file:bg-accent-soft file:px-3 file:py-2 file:text-accent"
                   type="file"
                   accept={uploadKind === "image" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.webm"}
-                  onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) => setSourceFile(event.target.files?.[0] ?? null)}
+                  disabled={isBusy}
+                />
+              </label>
+
+              <label className="block space-y-1">
+                <span className="text-sm font-medium">
+                  Reference Images (for multi-image prompt)
+                </span>
+                <input
+                  className="block w-full rounded-xl border border-line bg-white px-3 py-2 text-sm file:mr-4 file:rounded-lg file:border-0 file:bg-accent-soft file:px-3 file:py-2 file:text-accent"
+                  type="file"
+                  multiple
+                  accept=".jpg,.jpeg,.png,.webp"
+                  onChange={(event) => setReferenceFiles(Array.from(event.target.files ?? []))}
                   disabled={isBusy}
                 />
               </label>
@@ -327,7 +499,13 @@ export default function Home() {
                 <div
                   className="h-full bg-accent transition-all"
                   style={{
-                    width: `${stage === "uploading" ? uploadPercent : confirmedMediaAssetId ? 100 : 8}%`,
+                    width: `${
+                      stage === "uploading"
+                        ? uploadPercent
+                        : confirmedMediaAssetId || confirmedReferenceMediaAssetIds.length > 0
+                          ? 100
+                          : 8
+                    }%`,
                   }}
                 />
               </div>
@@ -335,7 +513,7 @@ export default function Home() {
               <button
                 type="submit"
                 className="rounded-xl bg-accent px-5 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={isBusy || !file}
+                disabled={isBusy || (!sourceFile && referenceFiles.length === 0)}
               >
                 Run Upload Flow
               </button>
@@ -343,14 +521,27 @@ export default function Home() {
               {confirmedMediaAssetId ? (
                 <p className="rounded-lg bg-accent-soft px-3 py-2 text-xs">
                   Confirmed media_asset_id:{" "}
-                  <span className="font-mono">{confirmedMediaAssetId}</span>
+                  <span className="font-mono">
+                    {confirmedMediaAssetId} ({confirmedSourceKind ?? "unknown"})
+                  </span>
                 </p>
+              ) : null}
+              {confirmedReferenceMediaAssetIds.length > 0 ? (
+                <div className="rounded-lg bg-accent-soft px-3 py-2 text-xs">
+                  <p>
+                    Confirmed reference assets: {confirmedReferenceMediaAssetIds.length}
+                  </p>
+                  <p className="mt-1 font-mono">
+                    {confirmedReferenceMediaAssetIds.join(", ")}
+                  </p>
+                </div>
               ) : null}
             </div>
           </form>
 
           <form
             onSubmit={handleGenerate}
+            id="generate-world-form"
             className="rounded-2xl border border-line bg-surface p-5 shadow-[0_12px_32px_rgba(31,30,27,0.08)]"
           >
             <h2 className="text-lg font-semibold">2. Generate World</h2>
@@ -358,6 +549,7 @@ export default function Home() {
               <label className="space-y-1">
                 <span className="text-sm font-medium">Display Name</span>
                 <input
+                  ref={displayNameInputRef}
                   className="w-full rounded-xl border border-line bg-white px-3 py-2 text-sm"
                   value={displayName}
                   onChange={(event) => setDisplayName(event.target.value)}
@@ -404,13 +596,42 @@ export default function Home() {
               </label>
 
               <label className="space-y-1 sm:col-span-2">
-                <span className="text-sm font-medium">Text Prompt (for text mode)</span>
+                <span className="text-sm font-medium">Text Prompt</span>
                 <textarea
                   className="min-h-20 w-full rounded-xl border border-line bg-white px-3 py-2 text-sm"
                   value={textPrompt}
                   onChange={(event) => setTextPrompt(event.target.value)}
                   placeholder="Warm Japanese-modern living room with oak and stone finishes."
                 />
+              </label>
+            </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={disableRecaption}
+                  onChange={(event) => setDisableRecaption(event.target.checked)}
+                />
+                Disable recaption
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={promptType === "image" ? isPano : false}
+                  onChange={(event) => setIsPano(event.target.checked)}
+                  disabled={promptType !== "image"}
+                />
+                Source is panorama
+              </label>
+              <label className="flex items-center gap-2 text-sm sm:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={promptType === "multi_image" ? reconstructImages : false}
+                  onChange={(event) => setReconstructImages(event.target.checked)}
+                  disabled={promptType !== "multi_image"}
+                />
+                Reconstruct images mode (multi-image)
               </label>
             </div>
 
@@ -429,7 +650,7 @@ export default function Home() {
             <button
               type="submit"
               className="mt-4 rounded-xl bg-[#0f766e] px-5 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={isBusy || !confirmedMediaAssetId}
+              disabled={!canGenerate}
             >
               Submit Generation
             </button>
@@ -507,7 +728,7 @@ export default function Home() {
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
-                        className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white"
+                        className="cursor-pointer rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white"
                         onClick={() => void openViewer(world.world_id)}
                       >
                         Open World
@@ -520,18 +741,15 @@ export default function Home() {
                       </Link>
                       <button
                         type="button"
-                        className="rounded-lg border border-line px-3 py-1.5 text-xs"
+                        className="cursor-pointer rounded-lg border border-line px-3 py-1.5 text-xs"
                         onClick={() => void copyShareLink(world.world_id)}
                       >
                         Copy Share Link
                       </button>
                       <button
                         type="button"
-                        className="rounded-lg border border-line px-3 py-1.5 text-xs"
-                        onClick={() => {
-                          setDisplayName(world.display_name ?? "");
-                          setPromptType("image");
-                        }}
+                        className="cursor-pointer rounded-lg border border-line px-3 py-1.5 text-xs"
+                        onClick={() => rerunWithEdits(world)}
                       >
                         Re-run with edits
                       </button>

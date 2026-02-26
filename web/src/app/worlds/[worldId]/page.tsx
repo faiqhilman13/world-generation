@@ -17,13 +17,14 @@ export default function WorldDetailPage() {
   const headingLabel = world?.display_name ?? (routeError ? "World Viewer" : `World ${worldId || ""}`);
 
   useEffect(() => {
-    if (routeError) {
+    if (routeError || !worldId) {
       return;
     }
+    const resolvedWorldId = worldId;
 
     const run = async () => {
       try {
-        const detail = await getWorldDetail(worldId);
+        const detail = await getWorldDetail(resolvedWorldId);
         try {
           await trackViewerOpen(true);
         } catch {}

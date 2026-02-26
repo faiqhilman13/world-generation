@@ -4,9 +4,10 @@ from app.main import app
 
 class FakeWorldLabsClient:
     def prepare_upload(self, *, file_name, kind, extension, metadata=None):
+        media_asset_id = "media_" + file_name.lower().replace(".", "_").replace("-", "_")
         return {
             "media_asset": {
-                "media_asset_id": "media_for_generation",
+                "media_asset_id": media_asset_id,
             },
             "upload_info": {
                 "method": "PUT",
@@ -46,11 +47,12 @@ def test_generate_world_creates_queued_job(client):
         },
     )
     assert prepare_response.status_code == 200
+    prepared_media_asset_id = prepare_response.json()["media_asset_id"]
 
     generate_response = client.post(
         "/v1/worlds/generate",
         json={
-            "source_media_asset_id": "media_for_generation",
+            "source_media_asset_id": prepared_media_asset_id,
             "prompt_type": "image",
             "display_name": "Demo world",
             "model": "Marble 0.1-mini",
@@ -75,3 +77,76 @@ def test_generate_world_creates_queued_job(client):
     sync_response = client.post("/v1/worlds/sync", json={"page_size": 20})
     assert sync_response.status_code == 200
     assert sync_response.json()["synced_count"] == 0
+
+
+def test_generate_world_text_prompt_without_media_asset(client):
+    fake_queue = FakeQueueClient()
+    app.dependency_overrides[worldlabs_client] = lambda: FakeWorldLabsClient()
+    app.dependency_overrides[job_queue_client] = lambda: fake_queue
+
+    generate_response = client.post(
+        "/v1/worlds/generate",
+        json={
+            "prompt_type": "text",
+            "text_prompt": "A cozy living room with oak finishes",
+            "display_name": "Text-only world",
+            "model": "Marble 0.1-mini",
+        },
+    )
+    assert generate_response.status_code == 200
+    body = generate_response.json()
+    assert body["status"] == "queued"
+    assert fake_queue.dispatched_job_ids == [body["job_id"]]
+
+
+def test_generate_world_rejects_missing_source_for_image_prompt(client):
+    fake_queue = FakeQueueClient()
+    app.dependency_overrides[worldlabs_client] = lambda: FakeWorldLabsClient()
+    app.dependency_overrides[job_queue_client] = lambda: fake_queue
+
+    generate_response = client.post(
+        "/v1/worlds/generate",
+        json={
+            "prompt_type": "image",
+            "display_name": "Invalid image world",
+            "model": "Marble 0.1-mini",
+        },
+    )
+    assert generate_response.status_code == 422
+    assert fake_queue.dispatched_job_ids == []
+
+
+def test_generate_world_multi_image_supports_reference_media_assets(client):
+    fake_queue = FakeQueueClient()
+    app.dependency_overrides[worldlabs_client] = lambda: FakeWorldLabsClient()
+    app.dependency_overrides[job_queue_client] = lambda: fake_queue
+
+    prepared_ids: list[str] = []
+    for file_name in ("room-base.jpg", "sofa-reference.jpg", "wallpaper-reference.jpg"):
+        prepare_response = client.post(
+            "/v1/uploads/prepare",
+            json={
+                "file_name": file_name,
+                "kind": "image",
+                "extension": "jpg",
+                "mime_type": "image/jpeg",
+            },
+        )
+        assert prepare_response.status_code == 200
+        prepared_ids.append(prepare_response.json()["media_asset_id"])
+
+    generate_response = client.post(
+        "/v1/worlds/generate",
+        json={
+            "source_media_asset_id": prepared_ids[0],
+            "reference_media_asset_ids": prepared_ids[1:],
+            "prompt_type": "multi_image",
+            "text_prompt": "Use darker walnut furniture with textured beige wallpaper",
+            "display_name": "Multi-image world",
+            "model": "Marble 0.1-mini",
+        },
+    )
+    assert generate_response.status_code == 200
+    body = generate_response.json()
+    assert body["status"] == "queued"
+    assert fake_queue.dispatched_job_ids == [body["job_id"]]

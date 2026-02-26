@@ -551,7 +551,7 @@ Structured JSON logs with:
 - Achieved in local flow (prepare -> direct upload -> confirm), plus proxy-upload fallback for signed-URL CORS failures (`POST /v1/uploads/proxy`).
 
 ## Phase 3: Generation orchestration (4-6 days)
-**Status (2026-02-25): Completed (with staged-provider validation pending)**
+**Status (2026-02-26): Completed (all World Prompt variants wired)**
 
 1. Implement `/v1/worlds/generate`.
 2. Queue worker and operation polling loop.
@@ -559,7 +559,7 @@ Structured JSON logs with:
 4. Implement `/v1/jobs/{id}` and `/v1/worlds` listing.
 
 ### Exit criteria
-- Implemented end-to-end orchestration in code, including worker polling and persistence.
+- Implemented end-to-end orchestration in code, including worker polling, persistence, and prompt-type routing for text/image/multi-image/video.
 
 ## Phase 4: Viewer and immersive UX (4-6 days)
 **Status (2026-02-25): Completed (v1 baseline)**
@@ -716,6 +716,13 @@ As soon as execution starts, any unknown provider payload nuances should be capt
 4. Async generation orchestration implemented (queue dispatch, operation polling, world finalization).
 5. Viewer flow implemented (modal viewer + dedicated world route + fallback behavior).
 6. Observability baseline implemented (structured logs, metrics endpoint, tracing hooks).
+7. Prompt coverage expanded to all World Labs world prompt classes:
+   - WorldTextPrompt
+   - ImagePrompt
+   - MultiImagePrompt (including reference media asset arrays)
+   - VideoPrompt
+8. API validation and frontend controls updated to enforce prompt-specific input requirements.
+9. `world_jobs.source_media_asset_id` made nullable so text-only generations can be queued without a source upload.
 
 ### Remaining high-priority tasks
 1. Staging deployment and live-provider smoke tests with real keys.

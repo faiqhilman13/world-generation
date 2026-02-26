@@ -93,8 +93,8 @@ class WorldJob(Base):
     session_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    source_media_asset_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=False, index=True
+    source_media_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=True, index=True
     )
     provider_operation_id: Mapped[str | None] = mapped_column(String(255), unique=True)
     provider_world_id: Mapped[str | None] = mapped_column(String(255), unique=True)
@@ -117,7 +117,7 @@ class WorldJob(Base):
     )
 
     session: Mapped[Session] = relationship(back_populates="world_jobs")
-    source_media_asset: Mapped[MediaAsset] = relationship(back_populates="world_jobs")
+    source_media_asset: Mapped[MediaAsset | None] = relationship(back_populates="world_jobs")
     world_view: Mapped["WorldView | None"] = relationship(
         back_populates="world_job", uselist=False
     )

@@ -43,25 +43,68 @@ def generate_world(
             max_age=settings.session_cookie_max_age_seconds,
         )
 
-    source_asset = (
-        db.query(MediaAsset)
-        .filter(
-            MediaAsset.provider_media_asset_id == payload.source_media_asset_id,
-            MediaAsset.session_id == session.id,
+    source_asset = None
+    if payload.source_media_asset_id:
+        source_asset = (
+            db.query(MediaAsset)
+            .filter(
+                MediaAsset.provider_media_asset_id == payload.source_media_asset_id,
+                MediaAsset.session_id == session.id,
+            )
+            .one_or_none()
         )
-        .one_or_none()
-    )
-    if source_asset is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="source_media_asset_id not found for this session",
+        if source_asset is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="source_media_asset_id not found for this session",
+            )
+
+    reference_ids: list[str] = []
+    seen_reference_ids: set[str] = set()
+    for media_asset_id in payload.reference_media_asset_ids:
+        if (
+            not media_asset_id
+            or media_asset_id == payload.source_media_asset_id
+            or media_asset_id in seen_reference_ids
+        ):
+            continue
+        seen_reference_ids.add(media_asset_id)
+        reference_ids.append(media_asset_id)
+    if reference_ids:
+        reference_assets = (
+            db.query(MediaAsset)
+            .filter(
+                MediaAsset.provider_media_asset_id.in_(reference_ids),
+                MediaAsset.session_id == session.id,
+            )
+            .all()
         )
+        existing_reference_ids = {
+            reference_asset.provider_media_asset_id for reference_asset in reference_assets
+        }
+        missing_references = [
+            media_asset_id
+            for media_asset_id in reference_ids
+            if media_asset_id not in existing_reference_ids
+        ]
+        if missing_references:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "reference_media_asset_ids not found for this session: "
+                    + ", ".join(missing_references)
+                ),
+            )
 
     try:
         world_prompt = build_world_prompt(
             prompt_type=payload.prompt_type,
             source_media_asset_id=payload.source_media_asset_id,
             text_prompt=payload.text_prompt,
+            disable_recaption=payload.disable_recaption,
+            is_pano=payload.is_pano,
+            reconstruct_images=payload.reconstruct_images,
+            reference_media_asset_ids=reference_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -77,7 +120,7 @@ def generate_world(
 
     job = WorldJob(
         session_id=session.id,
-        source_media_asset_id=source_asset.id,
+        source_media_asset_id=source_asset.id if source_asset else None,
         status="queued",
         progress_percent=0,
         request_payload=provider_request_payload,

@@ -100,9 +100,13 @@ export async function confirmUpload(mediaAssetId: string): Promise<void> {
 }
 
 export async function generateWorld(input: {
-  source_media_asset_id: string;
+  source_media_asset_id?: string | null;
   prompt_type: PromptType;
   text_prompt?: string | null;
+  disable_recaption?: boolean;
+  is_pano?: boolean;
+  reconstruct_images?: boolean;
+  reference_media_asset_ids?: string[];
   display_name?: string | null;
   model: string;
   seed?: number | null;
