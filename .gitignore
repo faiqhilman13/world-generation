@@ -1,0 +1,16 @@
+.env
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+api/.venv/
+worker/.venv/
+web/node_modules/
+web/.next/
+web/.turbo/
+web/dist/
+*.log

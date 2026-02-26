@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: interior-world-postgres
+    environment:
+      POSTGRES_DB: interior_world
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d interior_world"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: interior-world-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: interior-world-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/interior_world
+      REDIS_URL: redis://redis:6379/0
+      WORLDLABS_BASE_URL: ${WORLDLABS_BASE_URL:-https://api.worldlabs.ai}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-replace-me}
+      WORLDLABS_API_KEY: ${WORLDLABS_API_KEY:-replace-me}
+    volumes:
+      - ./api:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: interior-world-worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/interior_world
+      REDIS_URL: redis://redis:6379/0
+      WORLDLABS_BASE_URL: ${WORLDLABS_BASE_URL:-https://api.worldlabs.ai}
+      WORLDLABS_API_KEY: ${WORLDLABS_API_KEY:-replace-me}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+    volumes:
+      - ./api:/app/api
+      - ./worker:/app/worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: interior-world-web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${API_BASE_URL:-http://localhost:8000}
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
